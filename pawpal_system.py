@@ -1,9 +1,10 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 
-PRIORITY_ORDER = {"high": 1, "medium": 2, "low": 3}
+PRIORITY_ORDER  = {"high": 1, "medium": 2, "low": 3}
+RECURRENCE_DAYS = {"daily": 1, "weekly": 7}
 
 
 @dataclass
@@ -16,10 +17,17 @@ class Task:
     due_time: Optional[str] = None         # "HH:MM" or None
     scheduled_time: Optional[str] = None   # assigned by Scheduler
     completed: bool = False
+    recurrence: Optional[str] = None       # "daily", "weekly", or None
+    due_date: Optional[date] = None        # calendar date this occurrence is due
 
-    def mark_complete(self):
-        """Mark this task as completed."""
+    def mark_complete(self) -> Optional["Task"]:
+        """Mark this task as completed. Returns the next occurrence if recurrent, else None."""
         self.completed = True
+        days = RECURRENCE_DAYS.get(self.recurrence)
+        if days is None:
+            return None
+        base = self.due_date or date.today()
+        return replace(self, completed=False, scheduled_time=None, due_date=base + timedelta(days=days))
 
     def is_overdue(self) -> bool:
         """Return True if the task was scheduled after its due time."""
@@ -59,6 +67,26 @@ class Pet:
         """Return only tasks that have not been completed."""
         return [t for t in self.tasks if not t.completed]
 
+    def complete_task(self, task: Task) -> Optional[Task]:
+        """Mark a task complete and auto-append the next occurrence if it recurs.
+
+        Calls task.mark_complete(), which sets completed=True and, for recurring
+        tasks, returns a fresh Task with a new due_date advanced by the recurrence
+        interval (1 day for "daily", 7 days for "weekly"). That next occurrence is
+        appended to this pet's task list automatically so it will appear in future
+        generated plans without any extra calls from the caller.
+
+        Args:
+            task: A Task that belongs to this pet's task list.
+
+        Returns:
+            The newly created next-occurrence Task if the task recurs, else None.
+        """
+        next_task = task.mark_complete()
+        if next_task:
+            self.tasks.append(next_task)
+        return next_task
+
 
 class Owner:
     def __init__(self, name: str, available_hours: int):
@@ -81,6 +109,34 @@ class Owner:
             for task in pet.get_pending_tasks():
                 all_tasks.append((pet, task))
         return all_tasks
+
+    def filter_tasks(self, completed: Optional[bool] = None, pet_name: Optional[str] = None) -> list:
+        """Return (pet, task) pairs filtered by completion status and/or pet name.
+
+        Both parameters are optional. Omitting one skips that filter entirely,
+        so calling filter_tasks() with no arguments returns every task across all
+        pets. Pet name matching is case-insensitive. The method searches all tasks
+        on each pet (not just pending ones), so completed=True correctly surfaces
+        finished tasks.
+
+        Args:
+            completed: If True, include only completed tasks. If False, include
+                only pending tasks. If None (default), include tasks regardless
+                of completion status.
+            pet_name: If provided, include only tasks belonging to the pet whose
+                name matches this string (case-insensitive). If None (default),
+                include tasks from all pets.
+
+        Returns:
+            A list of (Pet, Task) tuples matching all supplied filters.
+        """
+        return [
+            (pet, task)
+            for pet in self.pets
+            if pet_name is None or pet.name.lower() == pet_name.lower()
+            for task in pet.tasks
+            if completed is None or task.completed == completed
+        ]
 
 
 class Scheduler:
@@ -113,6 +169,58 @@ class Scheduler:
             current += timedelta(minutes=task.duration)
             time_used += task.duration
 
+    def detect_conflicts(self) -> list:
+        """Return a list of warning strings for any overlapping tasks in the plan.
+
+        Compares every pair of scheduled tasks using interval overlap arithmetic:
+        two tasks conflict when one starts before the other ends. Each task's
+        "HH:MM" scheduled_time is converted to total minutes for integer
+        comparison, avoiding datetime parsing overhead. Tasks without a
+        scheduled_time are skipped. The method never raises — callers receive
+        an empty list when the plan is clean.
+
+        Returns:
+            A list of human-readable warning strings, one per conflicting pair.
+            Empty if no overlaps exist.
+        """
+        def to_minutes(hhmm: str) -> int:
+            h, m = map(int, hhmm.split(":"))
+            return h * 60 + m
+
+        warnings = []
+        tasks = [t for t in self.generated_plan if t.scheduled_time]
+
+        for i in range(len(tasks)):
+            for j in range(i + 1, len(tasks)):
+                a, b = tasks[i], tasks[j]
+                a_start, b_start = to_minutes(a.scheduled_time), to_minutes(b.scheduled_time)
+                a_end,   b_end   = a_start + a.duration,          b_start + b.duration
+                if a_start < b_end and b_start < a_end:
+                    warnings.append(
+                        f"WARNING: '{a.name}' ({a.scheduled_time}, {a.duration} min) "
+                        f"overlaps with '{b.name}' ({b.scheduled_time}, {b.duration} min) "
+                        f"for {self.pet.name}"
+                    )
+        return warnings
+
+    def sort_by_time(self) -> list:
+        """Return scheduled tasks sorted by scheduled_time in HH:MM order.
+
+        Uses Python's sorted() with a lambda key that extracts scheduled_time
+        directly as a string. Because the format is zero-padded "HH:MM",
+        lexicographic string order equals chronological order with no parsing
+        required. Tasks without a scheduled_time are excluded. The original
+        generated_plan list is not modified.
+
+        Returns:
+            A new list of Task objects ordered from earliest to latest
+            scheduled_time.
+        """
+        return sorted(
+            [t for t in self.generated_plan if t.scheduled_time],
+            key=lambda t: t.scheduled_time
+        )
+
     def generate_plan(self) -> list:
         """Build and return the full daily plan for the pet."""
         self.assign_time_slots()
@@ -142,7 +250,8 @@ class Scheduler:
                 f"because it has {task.priority} priority"
                 + (f" and preferred time {task.preferred_time}." if task.preferred_time else ".")
             )
-        skipped = [t for t in self.pet.get_pending_tasks() if t not in self.generated_plan]
+        scheduled_ids = {id(t) for t in self.generated_plan}
+        skipped = [t for t in self.pet.get_pending_tasks() if id(t) not in scheduled_ids]
         if skipped:
             skipped_names = ", ".join(t.name for t in skipped)
             lines.append(f"  Skipped (exceeded time budget): {skipped_names}")
