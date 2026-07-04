@@ -203,6 +203,64 @@ class Scheduler:
                     )
         return warnings
 
+    def find_next_slot(self, duration: int) -> Optional[str]:
+        """Return the earliest gap in the plan where a task of `duration` minutes fits.
+
+        Scans the generated plan as a sequence of occupied intervals and finds
+        the first opening where `duration` minutes of free time exist. Three
+        gap positions are checked in order:
+
+        1. Before the first scheduled task (between start_time and task 0).
+        2. Between every consecutive pair of tasks.
+        3. After the last task, up to midnight (23:59).
+
+        Each "HH:MM" scheduled_time is converted to integer minutes for
+        arithmetic; the result is converted back to "HH:MM" before returning.
+
+        Args:
+            duration: Required length of the task in minutes.
+
+        Returns:
+            The earliest available start time as "HH:MM", or None if no gap
+            large enough exists within the day.
+        """
+        def to_minutes(hhmm: str) -> int:
+            h, m = map(int, hhmm.split(":"))
+            return h * 60 + m
+
+        def to_hhmm(minutes: int) -> str:
+            return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+        scheduled = sorted(
+            [t for t in self.generated_plan if t.scheduled_time],
+            key=lambda t: to_minutes(t.scheduled_time),
+        )
+
+        day_start = to_minutes(self.start_time)
+        day_end   = 23 * 60 + 59   # latest returnable slot start
+
+        if not scheduled:
+            return to_hhmm(day_start) if duration <= day_end - day_start else None
+
+        # Gap before the first task
+        first_start = to_minutes(scheduled[0].scheduled_time)
+        if first_start - day_start >= duration:
+            return to_hhmm(day_start)
+
+        # Gaps between consecutive tasks
+        for i in range(len(scheduled) - 1):
+            gap_start = to_minutes(scheduled[i].scheduled_time) + scheduled[i].duration
+            gap_end   = to_minutes(scheduled[i + 1].scheduled_time)
+            if gap_end - gap_start >= duration:
+                return to_hhmm(gap_start)
+
+        # Gap after the last task
+        after_last = to_minutes(scheduled[-1].scheduled_time) + scheduled[-1].duration
+        if day_end - after_last >= duration:
+            return to_hhmm(after_last)
+
+        return None
+
     def sort_by_time(self) -> list:
         """Return scheduled tasks sorted by scheduled_time in HH:MM order.
 
