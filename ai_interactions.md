@@ -10,7 +10,7 @@
 
 **What task did you give the agent?**
 
-Add a third algorithmic capability — "find next available slot" — that scans a generated plan for the earliest gap large enough to fit a task of a given duration. Also add an Agent Workflow section to ai_interactions.md documenting the full change, and wire the feature into both the CLI (main.py) and the Streamlit UI (app.py).
+Add a third algorithmic capability — "find next available slot" — that scans a generated plan for the earliest gap large enough to fit a task of a given duration.
 
 **What did the agent do?**
 
